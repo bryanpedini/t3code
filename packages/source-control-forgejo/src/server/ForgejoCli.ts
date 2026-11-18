@@ -63,13 +63,16 @@ const GtAccountSchema = Schema.Struct({
   error: Schema.optional(Schema.NullOr(Schema.String)),
 });
 
-/** `gt auth status --json` lists one entry per account; its host is the instance URL with any mount. */
-export function parseGtLogins(
+/**
+ * `gt auth status --json` lists one entry per account; its host is the instance URL with any mount.
+ * Undefined when the output is not Gitea's, as from Graphite's CLI, which is also named `gt`.
+ */
+export function readGtLogins(
   raw: string,
   sshHosts: ReadonlyMap<string, string> = new Map(),
-): ReturnType<typeof parseForgejoLogins> {
+): ReturnType<typeof parseForgejoLogins> | undefined {
   const decoded = decodeJsonResult(Schema.Array(GtAccountSchema))(raw);
-  if (Result.isFailure(decoded)) return [];
+  if (Result.isFailure(decoded)) return undefined;
   return decoded.success.flatMap((account) => {
     const url = account.host.replace(/\/+$/, "");
     if (!account.user || !parseForgejoRemote(url)) return [];
@@ -85,6 +88,10 @@ export function parseGtLogins(
       },
     ];
   });
+}
+
+export function parseGtLogins(raw: string, sshHosts?: ReadonlyMap<string, string>) {
+  return readGtLogins(raw, sshHosts) ?? [];
 }
 
 type ForgejoCommand = "fj" | "gt" | "tea";
@@ -387,7 +394,15 @@ export const make = Effect.gen(function* () {
         command: "gt",
         cwd: input.cwd,
         args: ["auth", "status", "--json"],
+        allowNonZeroExit: true,
       });
+      if (readGtLogins(status.stdout) === undefined)
+        return yield* new ForgejoCliError({
+          command: "gt",
+          cwd: input.cwd,
+          reason: "missing-cli",
+          detail: "The `gt` on PATH is not the Gitea CLI.",
+        });
       const remote = input.remoteUrl ? parseForgejoRemote(input.remoteUrl) : null;
       const sshHosts = new Map<string, string>();
       // Only an SSH remote names a host that gt may know apart from the web URL.

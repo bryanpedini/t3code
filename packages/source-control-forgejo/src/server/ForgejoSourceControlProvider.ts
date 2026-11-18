@@ -73,7 +73,9 @@ export const gtDiscovery = {
   authArgs: ["auth", "status", "--json"],
   remoteRefinementArgs: () => ["auth", "status", "--json"],
   parseAuth: (input) => {
-    const logins = ForgejoCli.parseGtLogins(input.stdout);
+    const logins = ForgejoCli.readGtLogins(input.stdout);
+    if (logins === undefined)
+      return providerAuth({ status: "unknown", detail: "The `gt` on PATH is not the Gitea CLI." });
     const login =
       logins.find((entry) => entry.default === "true" && entry.valid === "true") ??
       logins.find((entry) => entry.valid === "true") ??
@@ -202,19 +204,18 @@ export const makeDiscovery = Effect.gen(function* () {
       }
       // gt supersedes tea: with both installed, gt serves unless only tea holds a login.
       const gt = yield* probeSourceControlProvider({ cwd, process, spec: gtDiscovery });
-      if (gt.status === "available" && gt.auth.status === "authenticated") return gt;
+      // Graphite's CLI is also named `gt`; only Gitea's answers `auth status --json`.
+      const gitea = gt.status === "available" && gt.auth.status !== "unknown";
+      if (gitea && gt.auth.status === "authenticated") return gt;
       const tea = yield* probeSourceControlProvider({ cwd, process, spec: discovery });
-      if (
-        tea.status === "available" &&
-        (gt.status !== "available" || tea.auth.status === "authenticated")
-      )
-        return tea;
-      if (gt.status === "available") return gt;
+      if (tea.status === "available" && (!gitea || tea.auth.status === "authenticated")) return tea;
+      if (gitea) return gt;
       // Discovery keeps the install hint only for an absent executable; a slow or broken fj or gt
       // explains itself better than tea's install advice.
       const absent = (probe: typeof fj) =>
         probe.status === "missing" && probe.installHint === discovery.installHint;
-      return !absent(fj) ? fj : !absent(gt) ? gt : tea;
+      if (!absent(fj)) return fj;
+      return gt.status === "missing" && !absent(gt) ? gt : tea;
     }),
     refineUnknownRemote: Effect.fn("ForgejoSourceControlProvider.refineUnknownRemote")(
       function* (input: {

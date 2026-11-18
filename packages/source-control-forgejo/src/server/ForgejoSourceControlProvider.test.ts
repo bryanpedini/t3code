@@ -2922,3 +2922,76 @@ it.effect("checks out a pull request with gt on the account that serves it", () 
     ),
   );
 });
+
+it.effect("ignores a gt on PATH that is not the Gitea CLI", () => {
+  const commands: string[] = [];
+  return Effect.gen(function* () {
+    const cli = yield* ForgejoCli.ForgejoCli;
+    const repository = yield* cli.resolveRepository({
+      cwd: "/repo",
+      repository: "https://gitea.local/maria/project",
+    });
+    assert.strictEqual(repository.command, "tea");
+    const spec = yield* ForgejoSourceControlProvider.makeDiscovery;
+    assert.strictEqual(spec.type, "managed-cli");
+    if (spec.type !== "managed-cli") return;
+    const result = yield* spec.probe("/repo");
+    assert.strictEqual(result.executable, "tea");
+    assert.strictEqual(result.auth.status, "authenticated");
+  }).pipe(
+    Effect.provide(
+      ForgejoCli.layer.pipe(
+        Layer.provideMerge(
+          Layer.mergeAll(
+            Layer.succeed(
+              FileSystem.FileSystem,
+              FileSystem.makeNoop({ exists: () => Effect.succeed(false) }),
+            ),
+            Layer.succeed(
+              HttpClient.HttpClient,
+              HttpClient.make(() => {
+                throw new Error("no HTTP expected");
+              }),
+            ),
+            TestSourceControlHost.layer({
+              process: {
+                run: (input) => {
+                  commands.push(`${input.command} ${input.args.join(" ")}`);
+                  if (input.command === "git") return Effect.succeed(processOutput(""));
+                  // Graphite's `gt` prints its own version and rejects Gitea's subcommands.
+                  if (input.command === "gt")
+                    return Effect.succeed(
+                      input.args[0] === "--version"
+                        ? processOutput("1.6.3")
+                        : processOutput("", {
+                            exitCode: ChildProcessSpawner.ExitCode(1),
+                            stderr: "ERROR: Unknown command auth\n",
+                          }),
+                    );
+                  if (input.command === "tea")
+                    return Effect.succeed(
+                      input.args[0] === "--version"
+                        ? processOutput("tea version 0.16.0")
+                        : processOutput(
+                            encodeJson([
+                              {
+                                name: "work",
+                                url: "https://gitea.local",
+                                user: "maria",
+                                default: "true",
+                                valid: "true",
+                              },
+                            ]),
+                          ),
+                    );
+                  return notInstalled(input);
+                },
+              },
+            }),
+          ),
+        ),
+      ),
+    ),
+    Effect.provideService(HostProcess.HomeDirectory, "/home/maria"),
+  );
+});
