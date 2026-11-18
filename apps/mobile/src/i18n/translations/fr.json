@@ -47,7 +47,7 @@
   "929a11e234f6e5d9": "Installez les outils en ligne de commande Azure ({cli}), puis activez la prise en charge d’Azure DevOps avec {command}.",
   "ad599e9de33538dd": "Ajoutez un jeton Bitbucket dans Paramètres → Gestion de versions et tickets.",
   "d810ecd91e8cf9d0": "Installez la CLI Origin avec {install}, puis exécutez {login}.",
-  "eb0f60ef4f92ab7d": "Installez {fj} 0.6 ou version ultérieure depuis {fjUrl} et exécutez {fjLogin}, ou installez {tea} 0.16 ou version ultérieure depuis {teaUrl} et exécutez {teaLogin} pour chaque serveur Forgejo ou Gitea.",
+  "fe66c5638a7acc71": "Installez {fj} 0.6 ou version ultérieure depuis {fjUrl} et exécutez {fjLogin}, installez {gt} 1.1 ou version ultérieure depuis {gtUrl} et exécutez {gtLogin}, ou installez {tea} 0.16 ou version ultérieure depuis {teaUrl} et exécutez {teaLogin} pour chaque serveur Forgejo ou Gitea.",
   "d026a85e2e50e675": "Installez la CLI GitCafe avec {install}, puis exécutez {login}, enregistrez un jeton dans Paramètres ou définissez {variable} sur le serveur.",
   "79d776428f4d0650": "Le fichier n’a pas pu être chargé. Reconnectez-vous et réessayez.",
   "3ea34cbb1ca5ba9b": "Aperçu annulé.",
