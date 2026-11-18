@@ -15,6 +15,7 @@ import * as HttpClientResponse from "effect/http/HttpClientResponse";
 import { VcsProcessSpawnError, VcsProcessTimeoutError } from "@t3tools/contracts";
 import { firstNonEmptyLine } from "@t3tools/source-control-core/server/discovery";
 import * as HostProcess from "@t3tools/shared/HostProcess";
+import type * as SourceControlHost from "@t3tools/source-control-core/server/SourceControlHost";
 import * as TestSourceControlHost from "@t3tools/source-control-testing/TestSourceControlHost";
 
 import * as ForgejoCli from "./ForgejoCli.ts";
@@ -34,6 +35,15 @@ const requestJson = (request: HttpClientRequest.HttpClientRequest): unknown => {
     : undefined;
 };
 const encodeJsonEffect = Schema.encodeEffect(Schema.fromJsonString(Schema.Unknown));
+const notInstalled = (input: { operation: string; command: string; cwd: string }) =>
+  Effect.fail(
+    new VcsProcessSpawnError({
+      operation: input.operation,
+      command: input.command,
+      cwd: input.cwd,
+      cause: new Error(`${input.command} not found`),
+    }),
+  );
 
 it.effect("reads clone URLs on the given host rather than the checkout's", () => {
   const urls: string[] = [];
@@ -1178,6 +1188,7 @@ it.effect(
               TestSourceControlHost.layer({
                 process: {
                   run: (input) => {
+                    if (input.command === "gt") return notInstalled(input);
                     if (input.args[0] === "login")
                       return Effect.succeed(
                         processOutput(
@@ -1828,6 +1839,7 @@ it.effect("routes mounted Forgejo repositories without repeating the mount in AP
               return Effect.succeed(
                 processOutput("", { exitCode: ChildProcessSpawner.ExitCode(2) }),
               );
+            if (input.command === "gt") return notInstalled(input);
             if (input.args[0] === "login")
               return Effect.succeed(
                 processOutput(
@@ -2338,6 +2350,7 @@ it.effect(
                         }),
                       );
                     }
+                    if (input.command === "gt") return notInstalled(input);
                     assert.strictEqual(input.command, "tea");
                     return Effect.succeed(
                       input.args[0] === "--version"
@@ -2481,3 +2494,431 @@ it.effect("does not call a valid fj login on an HTTP-only server unauthenticated
     Effect.provideService(HostProcess.HomeDirectory, "/home/maria"),
   ),
 );
+
+const gtAccounts = (accounts: ReadonlyArray<Record<string, unknown>>) =>
+  processOutput(encodeJson(accounts));
+
+it("reads gt accounts, preferring the active one, and refines remotes from them", () => {
+  const raw = encodeJson([
+    {
+      host: "https://gitea.local/",
+      user: "maria",
+      active: true,
+      credential_available: true,
+      error: "",
+    },
+    { host: "https://gitea.local", user: "bot", active: false, credential_available: true },
+    { host: "https://code.test/gitea", user: "maria", active: true, credential_available: true },
+  ]);
+  const logins = ForgejoCli.parseGtLogins(raw, new Map([["https://gitea.local", "ssh.local"]]));
+  assert.deepStrictEqual(
+    logins.map((login) => [login.name, login.url, login.default, login.ssh_host]),
+    [
+      ["maria@https://gitea.local", "https://gitea.local", "true", "ssh.local"],
+      ["bot@https://gitea.local", "https://gitea.local", "false", "ssh.local"],
+      ["maria@https://code.test/gitea", "https://code.test/gitea", "true", undefined],
+    ],
+  );
+  assert.deepStrictEqual(ForgejoCli.parseGtLogins("not json"), []);
+  const sameHost = logins.slice(0, 2);
+  const remote = ForgejoCli.parseForgejoRemote("https://gitea.local/maria/project.git");
+  assert.strictEqual(ForgejoCli.matchForgejoLogin(sameHost, remote!)?.user, "maria");
+  const alias = ForgejoCli.parseForgejoRemote("git@ssh.local:maria/project.git");
+  assert.strictEqual(ForgejoCli.matchForgejoLogin(sameHost, alias!)?.url, "https://gitea.local");
+
+  const auth = ForgejoSourceControlProvider.gtDiscovery.parseAuth(processOutput(raw));
+  assert.strictEqual(auth.status, "authenticated");
+  assert.deepStrictEqual(auth.account, Option.some("maria"));
+  assert.deepStrictEqual(auth.host, Option.some("gitea.local"));
+  const rejected = ForgejoSourceControlProvider.gtDiscovery.parseAuth(
+    gtAccounts([
+      {
+        host: "https://gitea.local",
+        user: "maria",
+        active: true,
+        credential_available: true,
+        error: "authentication rejected",
+      },
+    ]),
+  );
+  assert.strictEqual(rejected.status, "unauthenticated");
+  assert.include(
+    Option.getOrElse(rejected.detail, () => ""),
+    "gt auth login",
+  );
+  const none = ForgejoSourceControlProvider.gtDiscovery.parseAuth(gtAccounts([]));
+  assert.strictEqual(none.status, "unauthenticated");
+  assert.deepStrictEqual(
+    ForgejoSourceControlProvider.gtDiscovery.refineUnknownRemote({
+      cwd: "/repo",
+      context: {
+        provider: {
+          kind: SourceControlProviderKind.make("unknown"),
+          name: "code.test",
+          baseUrl: "https://code.test",
+        },
+        remoteName: "origin",
+        remoteUrl: "https://code.test/gitea/maria/project.git",
+      },
+      auth: processOutput(raw),
+    }),
+    {
+      kind: SourceControlProviderKind.make("forgejo"),
+      name: "Forgejo / Gitea",
+      baseUrl: "https://code.test/gitea",
+    },
+  );
+});
+
+const gtCliLayer = (input: {
+  readonly accounts: ReadonlyArray<Record<string, unknown>>;
+  readonly sshHost?: string;
+  readonly commands: Array<string>;
+  readonly api?: (
+    input: SourceControlHost.SourceControlProcessInput,
+  ) => Effect.Effect<ReturnType<typeof processOutput>>;
+  readonly teaLogins?: ReadonlyArray<Record<string, unknown>>;
+}) =>
+  ForgejoCli.layer.pipe(
+    Layer.provideMerge(
+      Layer.mergeAll(
+        Layer.succeed(
+          FileSystem.FileSystem,
+          FileSystem.makeNoop({ exists: () => Effect.succeed(false) }),
+        ),
+        Layer.succeed(
+          HttpClient.HttpClient,
+          HttpClient.make(() => {
+            throw new Error("gt must handle its own HTTP request");
+          }),
+        ),
+        TestSourceControlHost.layer({
+          process: {
+            run: (process) => {
+              input.commands.push(`${process.command} ${process.args.join(" ")}`);
+              if (process.command === "gt") {
+                if (process.args[0] === "auth") return Effect.succeed(gtAccounts(input.accounts));
+                if (process.args[0] === "config")
+                  return Effect.succeed(processOutput(`${input.sshHost ?? ""}\n`));
+                if (process.args[0] === "api" && input.api) return input.api(process);
+              }
+              if (process.command === "tea" && input.teaLogins) {
+                if (process.args[0] === "login")
+                  return Effect.succeed(processOutput(encodeJson(input.teaLogins)));
+                return Effect.succeed(processOutput("{}", { stderr: "HTTP/1.1 200 OK\n" }));
+              }
+              return notInstalled(process);
+            },
+          },
+        }),
+      ),
+    ),
+  );
+
+it.effect("prefers gt over tea and keeps the HTTP status of a failed gt request", () => {
+  const commands: string[] = [];
+  const apiCalls: Array<{ args: ReadonlyArray<string>; stdin?: string; allow?: boolean }> = [];
+  return Effect.gen(function* () {
+    const cli = yield* ForgejoCli.ForgejoCli;
+    const repository = yield* cli.resolveRepository({
+      cwd: "/repo",
+      repository: "https://gitea.local/maria/project",
+    });
+    assert.deepStrictEqual(repository, {
+      command: "gt",
+      login: "maria@https://gitea.local",
+      user: "maria",
+      repository: "maria/project",
+      baseUrl: "https://gitea.local",
+    });
+    const found = yield* cli.api({
+      cwd: "/repo",
+      repository: "https://gitea.local/maria/project",
+      path: "repos/maria/project",
+    });
+    assert.strictEqual(found.stdout, '{"full_name":"maria/project"}');
+    const failed = yield* cli
+      .api({
+        cwd: "/repo",
+        repository: "https://gitea.local/maria/project",
+        path: "repos/maria/project/pulls/42",
+        method: "PATCH",
+        body: { state: "closed" },
+      })
+      .pipe(Effect.flip);
+    assert.strictEqual(failed.command, "gt");
+    assert.strictEqual(failed.httpStatus, 404);
+    assert.strictEqual(failed.reason, "not-found");
+    assert.deepStrictEqual(apiCalls, [
+      {
+        args: [
+          "api",
+          "--include",
+          "--no-input",
+          "--host",
+          "https://gitea.local",
+          "--user",
+          "maria",
+          "--method",
+          "GET",
+          "https://gitea.local/api/v1/repos/maria/project",
+        ],
+        allow: true,
+      },
+      {
+        args: [
+          "api",
+          "--include",
+          "--no-input",
+          "--host",
+          "https://gitea.local",
+          "--user",
+          "maria",
+          "--method",
+          "PATCH",
+          "--input",
+          "-",
+          "https://gitea.local/api/v1/repos/maria/project/pulls/42",
+        ],
+        stdin: '{"state":"closed"}',
+        allow: true,
+      },
+    ]);
+    assert.isFalse(commands.some((command) => command.startsWith("tea ")));
+  }).pipe(
+    Effect.provide(
+      gtCliLayer({
+        commands,
+        accounts: [
+          { host: "https://gitea.local", user: "bot", active: false, credential_available: true },
+          { host: "https://gitea.local", user: "maria", active: true, credential_available: true },
+        ],
+        teaLogins: [{ name: "work", url: "https://gitea.local", user: "maria", default: "true" }],
+        api: (process) => {
+          apiCalls.push({
+            args: process.args,
+            ...(process.stdin === undefined ? {} : { stdin: process.stdin }),
+            ...(process.allowNonZeroExit === undefined ? {} : { allow: process.allowNonZeroExit }),
+          });
+          return Effect.succeed(
+            process.args.at(-1)?.endsWith("/pulls/42")
+              ? processOutput('{"message":"not found"}', {
+                  exitCode: ChildProcessSpawner.ExitCode(1),
+                  stderr:
+                    "HTTP/2.0 404 Not Found\nContent-Type: application/json\n\nError: not found (HTTP 404 PATCH /api/v1/repos/maria/project/pulls/42)\n",
+                })
+              : processOutput('{"full_name":"maria/project"}', {
+                  stderr: "HTTP/2.0 200 OK\nContent-Type: application/json\n",
+                }),
+          );
+        },
+      }),
+    ),
+  );
+});
+
+it.effect("falls back to tea when gt has no account for the server", () => {
+  const commands: string[] = [];
+  return Effect.gen(function* () {
+    const cli = yield* ForgejoCli.ForgejoCli;
+    const repository = yield* cli.resolveRepository({
+      cwd: "/repo",
+      repository: "https://gitea.local/maria/project",
+    });
+    assert.strictEqual(repository.command, "tea");
+    assert.strictEqual(repository.login, "work");
+    assert.isUndefined(repository.user);
+    assert.include(commands, "gt auth status --json");
+  }).pipe(
+    Effect.provide(
+      gtCliLayer({
+        commands,
+        accounts: [
+          { host: "https://other.local", user: "maria", active: true, credential_available: true },
+        ],
+        teaLogins: [{ name: "work", url: "https://gitea.local", user: "maria", default: "true" }],
+      }),
+    ),
+  );
+});
+
+it.effect("asks for a gt login when gt has no account and tea is not installed", () => {
+  const commands: string[] = [];
+  return Effect.gen(function* () {
+    const cli = yield* ForgejoCli.ForgejoCli;
+    const failure = yield* cli
+      .resolveRepository({ cwd: "/repo", repository: "https://gitea.local/maria/project" })
+      .pipe(Effect.flip);
+    assert.strictEqual(failure.command, "gt");
+    assert.strictEqual(failure.reason, "authentication");
+    assert.include(failure.detail, "gt auth login");
+  }).pipe(Effect.provide(gtCliLayer({ commands, accounts: [] })));
+});
+
+it.effect("serves an SSH remote through the SSH host gt is configured with", () => {
+  const commands: string[] = [];
+  return Effect.gen(function* () {
+    const cli = yield* ForgejoCli.ForgejoCli;
+    const repository = yield* cli.resolveRepository({
+      cwd: "/repo",
+      context: {
+        provider: {
+          kind: SourceControlProviderKind.make("forgejo"),
+          name: "Forgejo",
+          baseUrl: "https://gitea.local",
+        },
+        remoteName: "origin",
+        remoteUrl: "git@ssh.gitea.local:maria/project.git",
+      },
+    });
+    assert.strictEqual(repository.command, "gt");
+    assert.strictEqual(repository.baseUrl, "https://gitea.local");
+    assert.strictEqual(repository.repository, "maria/project");
+    assert.include(commands, "gt config get ssh_host --host https://gitea.local");
+  }).pipe(
+    Effect.provide(
+      gtCliLayer({
+        commands,
+        sshHost: "ssh.gitea.local",
+        accounts: [
+          { host: "https://gitea.local", user: "maria", active: true, credential_available: true },
+        ],
+      }),
+    ),
+  );
+});
+
+it.effect("discovers gt ahead of tea unless only tea holds a login", () =>
+  Effect.gen(function* () {
+    for (const scenario of ["gt-signed-in", "gt-signed-out", "tea-missing"] as const) {
+      yield* Effect.gen(function* () {
+        const spec = yield* ForgejoSourceControlProvider.makeDiscovery;
+        assert.strictEqual(spec.type, "managed-cli");
+        if (spec.type !== "managed-cli") return;
+        const result = yield* spec.probe("/repo");
+        assert.strictEqual(result.status, "available", scenario);
+        assert.strictEqual(
+          result.executable,
+          scenario === "gt-signed-out" ? "tea" : "gt",
+          scenario,
+        );
+        assert.strictEqual(
+          result.auth.status,
+          scenario === "tea-missing" ? "unauthenticated" : "authenticated",
+          scenario,
+        );
+      }).pipe(
+        Effect.provide(
+          Layer.mergeAll(
+            Layer.mock(ForgejoCli.ForgejoCli)({ listLogins: () => Effect.succeed([]) }),
+            TestSourceControlHost.layer({
+              process: {
+                run: (input) => {
+                  if (input.command === "git") return Effect.succeed(processOutput(""));
+                  if (input.command === "gt")
+                    return Effect.succeed(
+                      input.args[0] === "--version"
+                        ? processOutput("gt version 1.1.0 (2026-11-05)")
+                        : gtAccounts(
+                            scenario === "gt-signed-in"
+                              ? [
+                                  {
+                                    host: "https://gitea.local",
+                                    user: "maria",
+                                    active: true,
+                                    credential_available: true,
+                                  },
+                                ]
+                              : [],
+                          ),
+                    );
+                  if (input.command === "tea" && scenario !== "tea-missing")
+                    return Effect.succeed(
+                      input.args[0] === "--version"
+                        ? processOutput("tea version 0.16.0")
+                        : processOutput(
+                            encodeJson([
+                              {
+                                name: "work",
+                                url: "https://gitea.local",
+                                user: "maria",
+                                default: "true",
+                                valid: "true",
+                              },
+                            ]),
+                          ),
+                    );
+                  return notInstalled(input);
+                },
+              },
+            }),
+          ),
+        ),
+        Effect.provideService(HostProcess.HomeDirectory, "/home/maria"),
+      );
+    }
+  }),
+);
+
+it.effect("checks out a pull request with gt on the account that serves it", () => {
+  const executed: Array<{ command?: string; args: ReadonlyArray<string> }> = [];
+  return Effect.gen(function* () {
+    const provider = yield* ForgejoSourceControlProvider.make;
+    yield* provider.checkoutChangeRequest({ cwd: "/repo", reference: "42" });
+    assert.deepStrictEqual(executed, [
+      {
+        command: "gt",
+        args: [
+          "pr",
+          "checkout",
+          "42",
+          "--no-input",
+          "--host",
+          "https://code.test/gitea",
+          "--user",
+          "maria",
+          "--repo",
+          "maria/project",
+        ],
+      },
+    ]);
+  }).pipe(
+    Effect.provide(
+      Layer.mergeAll(
+        Layer.succeed(FileSystem.FileSystem, FileSystem.makeNoop({})),
+        TestSourceControlHost.layer({ process: { run: (input) => notInstalled(input) } }),
+        Layer.mock(ForgejoCli.ForgejoCli)({
+          resolveRepository: () =>
+            Effect.succeed({
+              command: "gt",
+              login: "maria@https://code.test/gitea",
+              user: "maria",
+              repository: "maria/project",
+              baseUrl: "https://code.test/gitea",
+            }),
+          api: () =>
+            Effect.succeed(
+              processOutput(
+                encodeJson({
+                  number: 42,
+                  title: "Checkout",
+                  html_url: "https://code.test/gitea/maria/project/pulls/42",
+                  state: "open",
+                  merged: false,
+                  base: { ref: "main", sha: "a".repeat(40), repo: null },
+                  head: { ref: "feature", sha: "b".repeat(40), repo: null },
+                }),
+              ),
+            ),
+          execute: (input) => {
+            executed.push({
+              ...(input.command === undefined ? {} : { command: input.command }),
+              args: input.args,
+            });
+            return Effect.succeed(processOutput(""));
+          },
+        }),
+      ),
+    ),
+  );
+});

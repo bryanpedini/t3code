@@ -47,7 +47,7 @@
   "929a11e234f6e5d9": "Installera Azures kommandoradsverktyg ({cli}) och aktivera sedan stöd för Azure DevOps med {command}.",
   "ad599e9de33538dd": "Lägg till en Bitbucket-token i Inställningar → Versionshantering och ärenden.",
   "d810ecd91e8cf9d0": "Installera Origin CLI med {install} och kör sedan {login}.",
-  "eb0f60ef4f92ab7d": "Installera {fj} 0.6 eller senare från {fjUrl} och kör {fjLogin}, eller installera {tea} 0.16 eller senare från {teaUrl} och kör {teaLogin} för varje Forgejo- eller Gitea-server.",
+  "fe66c5638a7acc71": "Installera {fj} 0.6 eller senare från {fjUrl} och kör {fjLogin}, installera {gt} 1.1 eller senare från {gtUrl} och kör {gtLogin}, eller installera {tea} 0.16 eller senare från {teaUrl} och kör {teaLogin} för varje Forgejo- eller Gitea-server.",
   "d026a85e2e50e675": "Installera GitCafe CLI med {install} och kör sedan {login}, spara en token i Inställningar eller ange {variable} på servern.",
   "79d776428f4d0650": "Filen kunde inte läsas in. Återanslut och försök igen.",
   "3ea34cbb1ca5ba9b": "Förhandsvisningen avbröts.",
